@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -14,8 +15,16 @@ st.markdown("Real-time AI predictions with >65% accuracy. Powered by ensemble ML
 # Load data/model
 if 'model' not in st.session_state:
     with st.spinner("Loading data and training models... (One-time)"):
-        df = fetch_historical()
-        st.session_state.df = process_data(df)
+        df_raw = fetch_historical()
+        df_processed = process_data(df_raw)
+        st.session_state.df = df_processed
+
+        if st.session_state.df.empty:
+            st.error("No historical match data could be loaded. Predictions will be very limited.")
+            st.info("Tip: Upload your own E0.csv files into the 'historical_data/' folder in GitHub.")
+        else:
+            st.success(f"Ready – {len(st.session_state.df)} historical matches loaded")
+
         st.session_state.model = PredictionEnsemble(st.session_state.df)
 
 # Fixtures selector
@@ -68,7 +77,6 @@ if st.button("Generate Prediction", type="primary"):
 # Season Simulator (Monte Carlo)
 if st.button("Simulate Season"):
     # Simple sim: 1000 runs based on probs
-    winners = {}  # Logic: for each match, sample outcome
     st.write("Demo: Arsenal 42% to win PL, Man City 35%...")  # Expand fully in prod
 
 # Telegram Alert
