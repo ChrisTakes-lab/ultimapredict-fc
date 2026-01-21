@@ -1,134 +1,155 @@
 import pandas as pd
 import requests
 import os
-import streamlit as st  # For secrets
+import glob
+import streamlit as st
 
-# Load keys from Streamlit secrets (add in Step 7)
-FOOTBALL_DATA_KEY = st.secrets.get("FOOTBALL_DATA_KEY", "fallback")
-API_FOOTBALL_KEY = st.secrets.get("API_FOOTBALL_KEY", "fallback")
-APIFOOTBALL_KEY = st.secrets.get("APIFOOTBALL_KEY", "fallback")
-ODDS_API_KEY = st.secrets.get("ODDS_API_KEY", "fallback")
-TELEGRAM_TOKEN = st.secrets.get("TELEGRAM_TOKEN", "fallback")
-TELEGRAM_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "fallback")
+# ───────────────────────────────────────────────
+# Try to load secrets – fallback to empty strings if not found
+FOOTBALL_DATA_KEY = st.secrets.get("FOOTBALL_DATA_KEY", "")
+API_FOOTBALL_KEY  = st.secrets.get("API_FOOTBALL_KEY",  "")
+APIFOOTBALL_KEY   = st.secrets.get("APIFOOTBALL_KEY",   "")
+ODDS_API_KEY      = st.secrets.get("ODDS_API_KEY",      "")
+TELEGRAM_TOKEN    = st.secrets.get("TELEGRAM_TOKEN",    "")
+TELEGRAM_CHAT_ID  = st.secrets.get("TELEGRAM_CHAT_ID",  "")
+
+# ───────────────────────────────────────────────
+def load_local_csvs():
+    """
+    Look for any .csv files the user manually placed in a 'historical_data/' folder
+    """
+    folder = "historical_data"
+    if not os.path.exists(folder):
+        os.makedirs(folder, exist_ok=True)
+        return pd.DataFrame()
+
+    files = glob.glob(os.path.join(folder, "*.csv"))
+    if not files:
+        st.info("No CSV files found in historical_data/ folder.")
+        return pd.DataFrame()
+
+    dfs = []
+    for f in files:
+        try:
+            df = pd.read_csv(f, on_bad_lines='skip', low_memory=False)
+            if not df.empty:
+                dfs.append(df)
+        except Exception as e:
+            st.warning(f"Could not read {os.path.basename(f)} → {e}")
+
+    if not dfs:
+        return pd.DataFrame()
+
+    combined = pd.concat(dfs, ignore_index=True)
+    st.success(f"Loaded {len(combined)} rows from {len(dfs)} local CSV file(s)")
+    return combined
+
 
 def download_csv_fallback():
-    os.makedirs('data', exist_ok=True)
-    years = range(2015, 2026)
-    dataframes = []
-    for y in years:
-        url = f"https://www.football-data.co.uk/mmz4281/{y % 100:02d}{(y + 1) % 100:02d}/E0.csv"
+    """
+    Download E0.csv files from football-data.co.uk – with heavy safety
+    """
+    base_url = "https://www.football-data.co.uk/mmz4281/"
+    seasons = [f"{y%100:02d}{(y+1)%100:02d}" for y in range(2014, 2027)]
+
+    dfs = []
+    for season in seasons:
+        url = f"{base_url}{season}/E0.csv"
         try:
-            df = pd.read_csv(url, on_bad_lines='skip')
-            dataframes.append(df)
-        except:
-            pass
-    full_df = pd.concat(dataframes, ignore_index=True)
-    full_df.to_csv('data/historical.csv', index=False)
-    return full_df
+            df = pd.read_csv(url, on_bad_lines='skip', low_memory=False)
+            if df.empty:
+                continue
+            if 'Date' not in df.columns:
+                possible = [c for c in df.columns if 'date' in c.lower()]
+                if possible:
+                    df = df.rename(columns={possible[0]: 'Date'})
+            dfs.append(df)
+            st.write(f"✓ Downloaded {len(df)} matches – {season}")
+        except Exception as e:
+            st.write(f"✗ Failed {season}: {str(e)[:80]}...")
 
-def fetch_fixtures(league_id=39, season=2025, upcoming=True):  # api-football.com (PL=39)
-    headers = {"x-apisports-key": API_FOOTBALL_KEY}
-    status = "NS,TBD" if upcoming else "FT"
-    url = f"https://v3.football.api-sports.io/fixtures?league={league_id}&season={season}&status={status}"
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        fixtures = response.json()['response']
-        return pd.DataFrame([{
-            'fixture_id': f['fixture']['id'],
-            'Date': f['fixture']['date'],
-            'HomeTeam': f['teams']['home']['name'],
-            'AwayTeam': f['teams']['away']['name'],
-            'FTR': f['goals']['home'] > f['goals']['away'] and 'H' or f['goals']['home'] < f['goals']['away'] and 'A' or 'D' if not upcoming else None
-        } for f in fixtures])
-    # Fallback to football-data.org
-    headers = {"X-Auth-Token": FOOTBALL_DATA_KEY}
-    url = f"http://api.football-data.org/v4/competitions/PL/matches?status=SCHEDULED" if upcoming else "..."
-    # ... similar parsing
-    # Extra fallback: apifootball.com
-    url = f"https://apiv3.apifootball.com/?action=get_events&from={season}-01-01&to={season+1}-12-31&league_id=152&APIkey={APIFOOTBALL_KEY}"
-    # Parse JSON to DF
-    return download_csv_fallback()  # Ultimate fallback
+    if not dfs:
+        st.error("Could not download any historical data from football-data.co.uk")
+        return pd.DataFrame()
 
-def fetch_historical(league_id=39, season=2025):
-    # Similar to fixtures but status=FT, multi-season aggregate
-    df = pd.DataFrame()
-    for s in range(2015, season+1):
-        temp = fetch_fixtures(league_id, s, upcoming=False)
-        df = pd.concat([df, temp])
-    # Augment with StatsBomb open data (free GitHub)
-    sb_url = "https://raw.githubusercontent.com/statsbomb/open-data/master/data/matches/37/{season}.json"  # PL code 37
-    sb_resp = requests.get(sb_url.replace('{season}', str(season - 2000)))  # Adjust
-    if sb_resp.status_code == 200:
-        # Parse xG, events to features
-        pass  # Add columns like 'xG_home'
-    return df
+    full = pd.concat(dfs, ignore_index=True)
+    return full
 
-def get_real_time_stats(team_name, league_id=39, season=2025):
-    headers = {"x-apisports-key": API_FOOTBALL_KEY}
-    team_url = f"https://v3.football.api-sports.io/teams?search={team_name}&league={league_id}&season={season}"
-    team_id = requests.get(team_url, headers=headers).json()['response'][0]['team']['id']
-    stats_url = f"https://v3.football.api-sports.io/teams/statistics?team={team_id}&league={league_id}&season={season}"
-    resp = requests.get(stats_url, headers=headers)
-    if resp.status_code == 200:
-        stats = resp.json()['response']
-        return {'gf': stats['goals']['for']['total']['total'], 'ga': stats['goals']['against']['total']['total'], 'form': stats['form']}
-    # Fallback FBref scrape
-    from bs4 import BeautifulSoup
-    url = "https://fbref.com/en/comps/9/Premier-League-Stats"
-    soup = BeautifulSoup(requests.get(url).text, 'html.parser')
-    # Parse table for team stats
-    return {'gf': 40, 'ga': 20, 'form': 'WWDLW'}  # Demo
 
-def get_odds(home, away, markets='h2h,totals'):
-    # The Odds API with your key
-    sport = 'soccer_epl'  # Expand to others
-    url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds/?apiKey={ODDS_API_KEY}&regions=us,eu,uk,au&markets={markets}&oddsFormat=decimal&bookmakers=draftkings,fanduel,betmgm,bet365,pinnacle"
-    resp = requests.get(url)
-    if resp.status_code == 200:
-        data = resp.json()
-        match_odds = next((event for event in data if (event['home_team'] in home or home in event['home_team']) and (event['away_team'] in away or away in event['away_team'])), None)
-        if match_odds:
-            averages = {'home_win': 0, 'draw': 0, 'away_win': 0, 'over_2_5': 0, 'bookmakers_count': 0}
-            for bm in match_odds['bookmakers']:
-                averages['bookmakers_count'] += 1
-                for m in bm['markets']:
-                    if m['key'] == 'h2h':
-                        for o in m['outcomes']:
-                            if o['name'] == home: averages['home_win'] += o['price']
-                            elif o['name'] == 'Draw': averages['draw'] += o['price']
-                            elif o['name'] == away: averages['away_win'] += o['price']
-                    if m['key'] == 'totals' and any(o['point'] == 2.5 for o in m['outcomes']):
-                        for o in m['outcomes']:
-                            if o['name'] == 'Over' and o['point'] == 2.5: averages['over_2_5'] += o['price']
-            for k in ['home_win', 'draw', 'away_win', 'over_2_5']:
-                if averages['bookmakers_count'] > 0:
-                    averages[k] /= averages['bookmakers_count']
-            return averages
-    # Fallback scrape (oddschecker or similar)
-    from bs4 import BeautifulSoup
-    scrape_url = f"https://www.oddschecker.com/football/english/premier-league/{home.lower().replace(' ', '-')}-v-{away.lower().replace(' ', '-')}/winner"
-    resp = requests.get(scrape_url)
-    soup = BeautifulSoup(resp.text, 'html.parser')
-    # Extract odds from DOM (simplified; use class selectors)
-    return {'home_win': 5.5, 'draw': 4.0, 'away_win': 1.6, 'over_2_5': 1.8}  # Example decimals
+def fetch_historical():
+    """
+    1. Try local user-provided CSVs first
+    2. Then try downloading fresh data
+    3. Return minimal dummy if everything fails
+    """
+    # Priority 1: user's manual CSVs
+    df_local = load_local_csvs()
+    if not df_local.empty:
+        return df_local
 
-def get_external_prediction(fixture_id):
-    headers = {"x-apisports-key": API_FOOTBALL_KEY}
-    url = f"https://v3.football.api-sports.io/predictions?fixture={fixture_id}"
-    resp = requests.get(url, headers=headers)
-    if resp.status_code == 200:
-        pred = resp.json()['response'][0]['predictions']
-        return {
-            'win_prob': {'Home Win': float(pred['percent']['home'].strip('%')), 'Draw': float(pred['percent']['draw'].strip('%')), 'Away Win': float(pred['percent']['away'].strip('%'))},
-            'over_25': float(pred['under_over']['+2.5'].strip('%')) if '+2.5' in pred['under_over'] else 50
-        }
-    return {'win_prob': {'Home Win': 50, 'Draw': 0, 'Away Win': 50}, 'over_25': 50}  # Fallback
+    # Priority 2: download
+    df_web = download_csv_fallback()
+    if not df_web.empty:
+        return df_web
+
+    # Last resort: tiny dummy so the app doesn't crash
+    st.warning("Using minimal dummy data – predictions will be very limited")
+    dummy = pd.DataFrame({
+        'Date':      ['2025-08-10', '2025-08-16', '2025-08-23'],
+        'HomeTeam':  ['Arsenal',    'Man City',   'Liverpool'],
+        'AwayTeam':  ['Wolves',     'Chelsea',    'Brighton'],
+        'FTHG':      [2,            3,            1],
+        'FTAG':      [1,            1,            1],
+        'FTR':       ['H',          'D',          'A']
+    })
+    dummy['Date'] = pd.to_datetime(dummy['Date'])
+    return dummy
+
 
 def process_data(df):
-    df['Date'] = pd.to_datetime(df['Date'])
-    df = df.sort_values('Date')
-    # Feature eng: Elo, rolling form, xG from StatsBomb
-    teams = pd.unique(pd.concat([df['HomeTeam'], df['AwayTeam']]))
-    df['home_elo'] = 1500  # Init, update with logic
-    # ... add more
+    """
+    Safe processing – never assume columns exist
+    """
+    if df is None or df.empty:
+        st.warning("No data available → empty DataFrame returned")
+        return pd.DataFrame(columns=['Date','HomeTeam','AwayTeam','FTHG','FTAG','FTR'])
+
+    # Show what we actually received
+    st.write("Columns found in data:", list(df.columns))
+
+    # Find date column (case insensitive)
+    date_candidates = [c for c in df.columns if 'date' in c.lower()]
+    date_col = date_candidates[0] if date_candidates else None
+
+    if date_col:
+        try:
+            df[date_col] = pd.to_datetime(df[date_col], dayfirst=True, errors='coerce')
+            df = df.sort_values(date_col)
+        except Exception as e:
+            st.warning(f"Could not parse dates from '{date_col}': {e}")
+    else:
+        st.warning("No date column detected → skipping date sorting")
+
+    # Standardize column names we care about
+    rename_map = {}
+    for c in df.columns:
+        cl = c.lower()
+        if 'home' in cl and 'team' in cl:   rename_map[c] = 'HomeTeam'
+        if 'away' in cl and 'team' in cl:   rename_map[c] = 'AwayTeam'
+        if 'fthg' in cl or 'home goals' in cl: rename_map[c] = 'FTHG'
+        if 'ftag' in cl or 'away goals' in cl: rename_map[c] = 'FTAG'
+        if 'ftr'  in cl or 'result' in cl:     rename_map[c] = 'FTR'
+
+    df = df.rename(columns=rename_map)
+
+    # Keep only columns we actually use downstream
+    keep = ['Date', 'HomeTeam', 'AwayTeam', 'FTHG', 'FTAG', 'FTR']
+    existing = [c for c in keep if c in df.columns]
+    df = df[existing]
+
+    st.write(f"Processed data shape: {df.shape}")
     return df
+
+
+# Keep your other functions (get_odds, fetch_fixtures, etc.) unchanged
+# ───────────────────────────────────────────────
