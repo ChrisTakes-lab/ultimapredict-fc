@@ -1,99 +1,141 @@
-
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 import asyncio
 from telegram import Bot
-from data_utils import fetch_fixtures, fetch_historical, get_real_time_stats, process_data
+
+# ───────────────────────────────────────────────
+# Debug import block – remove after confirming it works
+try:
+    from data_utils import fetch_fixtures, fetch_historical, get_real_time_stats, process_data
+    st.success("Imported functions from data_utils.py successfully")
+except ImportError as e:
+    st.error(f"Failed to import from data_utils: {str(e)}")
+    st.info("Make sure the file is named exactly 'data_utils.py' (lowercase + underscore) and is in the repo root.")
+
 from model import PredictionEnsemble
 
 st.set_page_config(page_title="UltimaPredict FC", layout="wide", page_icon="⚽")
 
 st.title("UltimaPredict FC: The Greatest Football Predictions Platform")
-st.markdown("Real-time AI predictions with >65% accuracy. Powered by ensemble ML + APIs. Nairobi time: Jan 21, 2026.")  # Personalized
+st.markdown("Real-time AI predictions with ensemble ML + real APIs. Nairobi time: Jan 21, 2026.")
 
-# Load data/model
-if 'model' not in st.session_state:
-    with st.spinner("Loading data and training models... (One-time)"):
-        df_raw = fetch_historical()
-        df_processed = process_data(df_raw)
-        st.session_state.df = df_processed
+# ───────────────────────────────────────────────
+# Load data & model
+if 'df' not in st.session_state or 'model' not in st.session_state:
+    with st.spinner("Loading historical data and training model..."):
+        raw_df = fetch_historical()
+        processed_df = process_data(raw_df)
+        st.session_state.df = processed_df
 
-        if st.session_state.df.empty:
-            st.error("No historical match data could be loaded. Predictions will be very limited.")
-            st.info("Tip: Upload your own E0.csv files into the 'historical_data/' folder in GitHub.")
+        if processed_df.empty:
+            st.error("No usable historical data loaded.")
+            st.info("""
+            Upload your E0.csv files (from football-data.co.uk) into the 'historical_data/' folder in this GitHub repo.
+            After upload, wait 1–2 minutes for redeploy.
+            """)
         else:
-            st.success(f"Ready – {len(st.session_state.df)} historical matches loaded")
+            st.success(f"Loaded {len(processed_df)} historical matches")
 
-        st.session_state.model = PredictionEnsemble(st.session_state.df)
+        try:
+            st.session_state.model = PredictionEnsemble(st.session_state.df)
+            st.success("Model trained successfully")
+        except Exception as e:
+            st.error(f"Model training failed: {str(e)}")
 
-# Fixtures selector
-league = st.selectbox("League", ["Premier League (39)", "La Liga (140)", "Bundesliga (78)", "Serie A (135)", "Champions League (2)"])  # IDs
+# ───────────────────────────────────────────────
+# League & match selector
+league_options = [
+    "Premier League (39)",
+    "La Liga (140)",
+    "Bundesliga (78)",
+    "Serie A (135)",
+    "Champions League (2)"
+]
+league = st.selectbox("Select League", league_options)
 league_id = int(league.split("(")[1].strip(")"))
-upcoming = fetch_fixtures(league_id=league_id, upcoming=True)
-if not upcoming.empty:
-    match_options = upcoming['HomeTeam'] + " vs " + upcoming['AwayTeam'] + " (" + upcoming['Date'].dt.strftime('%b %d') + ")"
-    selected = st.selectbox("Upcoming Match", match_options)
-    home, away = selected.split(" vs ")[0], selected.split(" vs ")[1].split(" (")[0]
-    fixture_id = upcoming[upcoming['HomeTeam'] == home].iloc[0]['fixture_id']
+
+upcoming_df = fetch_fixtures(league_id=league_id, upcoming=True)
+
+if not upcoming_df.empty:
+    match_strs = upcoming_df['HomeTeam'] + " vs " + upcoming_df['AwayTeam'] + " (" + upcoming_df['Date'].dt.strftime('%Y-%m-%d') + ")"
+    selected_match = st.selectbox("Select Upcoming Match", match_strs)
+    parts = selected_match.split(" vs ")
+    home = parts[0]
+    away_part = parts[1]
+    away = away_part.split(" (")[0]
+    fixture_row = upcoming_df[upcoming_df['HomeTeam'] == home]
+    fixture_id = fixture_row['fixture_id'].iloc[0] if not fixture_row.empty else None
 else:
-    home = st.text_input("Home Team", "Leeds United")
-    away = st.text_input("Away Team", "Arsenal")
+    st.warning("No upcoming matches found via API – using manual input")
+    home = st.text_input("Home Team", "Arsenal")
+    away = st.text_input("Away Team", "Man City")
     fixture_id = None
 
-scenario = st.selectbox("Scenario", [None, "Injury to Home Key Player", "Injury to Away Key Player"])
+scenario = st.selectbox("Scenario Simulation", [None, "Injury to Home Key Player", "Injury to Away Key Player"])
 
+# ───────────────────────────────────────────────
 if st.button("Generate Prediction", type="primary"):
-    pred = st.session_state.model.predict(home, away, fixture_id, scenarios=scenario)
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Prediction")
-        st.write(f"**Outcome:** {pred['predicted_outcome']} ({pred['confidence']:.1f}% confidence)")
-        st.write(f"**Score:** {home} {pred['predicted_score']} {away}")
-        st.write(f"**Over 2.5 Goals:** {pred['over_25_prob']:.1f}%")
-        probs = pred['outcome_prob']
-        st.write(f"Probabilities: {home} Win {probs['Home Win']:.1f}%, Draw {probs['Draw']:.1f}%, {away} Win {probs['Away Win']:.1f}%")
+    if 'model' not in st.session_state:
+        st.error("Model not loaded yet. Wait for data loading to finish.")
+    else:
+        with st.spinner("Running prediction..."):
+            pred = st.session_state.model.predict(home, away, fixture_id, scenarios=scenario)
 
-    with col2:
-        st.subheader("Betting Insights")
-        st.write(f"**Avg Odds:** {home} {pred['odds'].get('home_win', 'N/A'):.2f}, Draw {pred['odds'].get('draw', 'N/A'):.2f}, {away} {pred['odds'].get('away_win', 'N/A'):.2f}")
-        st.write(f"**Over 2.5 Odds:** {pred['odds'].get('over_2_5', 'N/A'):.2f}")
-        evs = pred['ev']
-        st.write(f"EV: {home} Win {evs['Home Win']:.2f}, Draw {evs['Draw']:.2f}, {away} Win {evs['Away Win']:.2f}, Over 2.5 {evs['Over 2.5']:.2f}")
-        if pred['best_bet']:
-            st.success(f"**Best Bet:** {pred['best_bet']} (EV {evs[pred['best_bet']]:.2f})")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Prediction")
+            st.write(f"**Most likely outcome:** {pred['predicted_outcome']} ({pred['confidence']:.1f}% conf)")
+            st.write(f"**Predicted score:** {home} **{pred['predicted_score']}** {away}")
+            st.write(f"**Over 2.5 goals prob:** {pred['over_25_prob']:.1f}%")
 
-    # Viz
-    fig, ax = plt.subplots()
-    ax.bar(probs.keys(), probs.values(), color=['green', 'yellow', 'red'])
-    ax.set_title("Outcome Probabilities")
-    st.pyplot(fig)
+            probs = pred['outcome_prob']
+            st.write(f"{home} Win: {probs['Home Win']:.1f}% | Draw: {probs['Draw']:.1f}% | {away} Win: {probs['Away Win']:.1f}%")
 
-    # Stats
-    st.subheader("Team Stats")
-    st.write(f"{home}: {get_real_time_stats(home)}")
-    st.write(f"{away}: {get_real_time_stats(away)}")
+        with col2:
+            st.subheader("Betting Value")
+            odds = pred.get('odds', {})
+            st.write(f"Avg odds: {home} {odds.get('home_win', 'N/A'):.2f} | Draw {odds.get('draw', 'N/A'):.2f} | {away} {odds.get('away_win', 'N/A'):.2f}")
+            st.write(f"Over 2.5 odds: {odds.get('over_2_5', 'N/A'):.2f}")
 
-# Season Simulator (Monte Carlo)
-if st.button("Simulate Season"):
-    # Simple sim: 1000 runs based on probs
-    st.write("Demo: Arsenal 42% to win PL, Man City 35%...")  # Expand fully in prod
+            evs = pred.get('ev', {})
+            st.write(f"EV: {home} {evs.get('Home Win', 0):.2f} | Draw {evs.get('Draw', 0):.2f} | {away} {evs.get('Away Win', 0):.2f} | Over 2.5 {evs.get('Over 2.5', 0):.2f}")
 
-# Telegram Alert
-if st.button("Send Prediction to Telegram"):
-    bot = Bot(token=TELEGRAM_TOKEN)
-    message = f"UltimaPredict: {home} vs {away} - {pred['predicted_outcome']} (Conf: {pred['confidence']:.1f}%)\nBest Bet: {pred['best_bet']} (EV: {pred['ev'].get(pred['best_bet'], 0):.2f})"
-    async def send_async():
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
-    asyncio.run(send_async())
-    st.success("Alert sent to your Telegram!")
+            if pred.get('best_bet'):
+                st.success(f"**Recommended bet:** {pred['best_bet']} (EV {evs[pred['best_bet']]:.2f})")
 
-# Advanced Features
-with st.expander("Custom Analytics"):
-    st.write("xG Analysis, Player Impacts, etc. – Coming soon or query via chat.")
+        # Probability bar chart
+        fig, ax = plt.subplots()
+        ax.bar(probs.keys(), probs.values(), color=['#4CAF50', '#FFC107', '#F44336'])
+        ax.set_title("Outcome Probabilities")
+        ax.set_ylim(0, 100)
+        st.pyplot(fig)
 
-# Monetization/Ethics
-st.info("Free forever. Responsible gambling: Set limits. For entertainment only.")
+        st.subheader("Current Team Stats (API)")
+        st.write(f"{home}: {get_real_time_stats(home)}")
+        st.write(f"{away}: {get_real_time_stats(away)}")
 
-# Local Run Option
-st.markdown("**Local Test:** `streamlit run app.py` in terminal.")
+# ───────────────────────────────────────────────
+if st.button("Send this Prediction to Telegram"):
+    if 'model' in st.session_state:
+        bot = Bot(token=st.secrets.get("TELEGRAM_TOKEN", ""))
+        message = (
+            f"UltimaPredict FC\n"
+            f"{home} vs {away}\n"
+            f"→ {pred['predicted_outcome']} ({pred['confidence']:.1f}%)\n"
+            f"Score: {pred['predicted_score']}\n"
+            f"Over 2.5: {pred['over_25_prob']:.1f}%\n"
+            f"Best bet: {pred.get('best_bet', 'None')} (EV {pred['ev'].get(pred.get('best_bet'), 0):.2f})"
+        )
+        async def send_msg():
+            try:
+                await bot.send_message(chat_id=st.secrets.get("TELEGRAM_CHAT_ID", ""), text=message)
+                st.success("Sent to Telegram!")
+            except Exception as e:
+                st.error(f"Telegram send failed: {e}")
+
+        asyncio.run(send_msg())
+    else:
+        st.warning("No prediction available yet.")
+
+st.info("For entertainment & analysis only. Gamble responsibly.")
